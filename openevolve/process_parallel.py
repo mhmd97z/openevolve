@@ -583,73 +583,70 @@ class ProcessParallelController:
                             completed_iteration,
                             child_program.id,
                         )
-                        continue
-
-                    # Add to database with explicit target_island to ensure proper island placement
-                    # This fixes issue #391: children should go to the target island, not inherit
-                    # from the parent (which may be from a different island due to fallback sampling)
-                    self.database.add(
-                        child_program,
-                        iteration=completed_iteration,
-                        target_island=result.target_island,
-                    )
-
-                    # Store artifacts
-                    if result.artifacts:
-                        self.database.store_artifacts(child_program.id, result.artifacts)
-
-                    # Log evolution trace
-                    if self.evolution_tracer:
-                        # Retrieve parent program for trace logging
-                        parent_program = (
-                            self.database.get(result.parent_id) if result.parent_id else None
+                    else:
+                        # Add to database with explicit target_island to ensure proper island placement
+                        # This fixes issue #391: children should go to the target island, not inherit
+                        # from the parent (which may be from a different island due to fallback sampling)
+                        self.database.add(
+                            child_program,
+                            iteration=completed_iteration,
+                            target_island=result.target_island,
                         )
-                        if parent_program:
-                            # Determine island ID
-                            island_id = child_program.metadata.get(
-                                "island", self.database.current_island
-                            )
 
-                            self.evolution_tracer.log_trace(
-                                iteration=completed_iteration,
-                                parent_program=parent_program,
-                                child_program=child_program,
+                        # Store artifacts
+                        if result.artifacts:
+                            self.database.store_artifacts(child_program.id, result.artifacts)
+
+                        # Log evolution trace
+                        if self.evolution_tracer:
+                            # Retrieve parent program for trace logging
+                            parent_program = (
+                                self.database.get(result.parent_id) if result.parent_id else None
+                            )
+                            if parent_program:
+                                # Determine island ID
+                                island_id = child_program.metadata.get(
+                                    "island", self.database.current_island
+                                )
+
+                                self.evolution_tracer.log_trace(
+                                    iteration=completed_iteration,
+                                    parent_program=parent_program,
+                                    child_program=child_program,
+                                    prompt=result.prompt,
+                                    llm_response=result.llm_response,
+                                    artifacts=result.artifacts,
+                                    island_id=island_id,
+                                    metadata={
+                                        "iteration_time": result.iteration_time,
+                                        "changes": child_program.metadata.get("changes", ""),
+                                    },
+                                )
+
+                        # Log prompts
+                        if result.prompt:
+                            self.database.log_prompt(
+                                template_key=(
+                                    "full_rewrite_user"
+                                    if not self.config.diff_based_evolution
+                                    else "diff_user"
+                                ),
+                                program_id=child_program.id,
                                 prompt=result.prompt,
-                                llm_response=result.llm_response,
-                                artifacts=result.artifacts,
-                                island_id=island_id,
-                                metadata={
-                                    "iteration_time": result.iteration_time,
-                                    "changes": child_program.metadata.get("changes", ""),
-                                },
+                                responses=[result.llm_response] if result.llm_response else [],
                             )
 
-                    # Log prompts
-                    if result.prompt:
-                        self.database.log_prompt(
-                            template_key=(
-                                "full_rewrite_user"
-                                if not self.config.diff_based_evolution
-                                else "diff_user"
-                            ),
-                            program_id=child_program.id,
-                            prompt=result.prompt,
-                            responses=[result.llm_response] if result.llm_response else [],
-                        )
+                        # Island management
+                        island_id = child_program.metadata.get("island", self.database.current_island)
+                        self.database.increment_island_generation(island_idx=island_id)
 
-                    # Island management
-                    # get current program island id
-                    island_id = child_program.metadata.get("island", self.database.current_island)
-                    # use this to increment island generation
-                    self.database.increment_island_generation(island_idx=island_id)
+                        # Check migration
+                        if self.database.should_migrate():
+                            logger.info(f"Performing migration at iteration {completed_iteration}")
+                            self.database.migrate_programs()
+                            self.database.log_island_status()
 
-                    # Check migration
-                    if self.database.should_migrate():
-                        logger.info(f"Performing migration at iteration {completed_iteration}")
-                        self.database.migrate_programs()
-                        self.database.log_island_status()
-
-                    # Log progress
+                    # Log progress (always, even for compile failures)
                     logger.info(
                         f"Iteration {completed_iteration}: "
                         f"Program {child_program.id} "

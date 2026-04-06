@@ -43,13 +43,8 @@ function computeMetricMinMax(nodes) {
 function formatMetrics(metrics) {
     if (!metrics || typeof metrics !== 'object') return '';
     let rows = Object.entries(metrics).map(([k, v]) => {
-        let min = 0, max = 1;
-        if (metricMinMax[k]) {
-            min = metricMinMax[k].min;
-            max = metricMinMax[k].max;
-        }
         let valStr = (typeof v === 'number' && isFinite(v)) ? v.toFixed(4) : v;
-        return `<tr><td style='padding-right:0.7em;'><b>${k}</b></td><td style='padding-right:0.7em;'>${valStr}</td><td style='min-width:90px;'>${typeof v === 'number' ? renderMetricBar(v, min, max) : ''}</td></tr>`;
+        return `<tr><td style='padding-right:0.7em;'><b>${k}</b></td><td style='padding-right:0.7em;'>${valStr}</td></tr>`;
     }).join('');
     return `<table class='metrics-table'><tbody>${rows}</tbody></table>`;
 }
