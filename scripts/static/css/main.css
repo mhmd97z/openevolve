@@ -193,6 +193,63 @@ h1 span { font-size: 0.5em; color: #666; }
     margin: 0;
     display: block;
 }
+#view-bins {
+    width: 100vw;
+    height: calc(100vh - var(--toolbar-height));
+    min-height: 300px;
+    position: relative;
+    overflow: hidden;
+    padding: 0;
+    margin: 0;
+    display: block;
+}
+#bins-graph {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+#bins-controls {
+    position: relative;
+    z-index: 5;
+    background: var(--toolbar-bg, #fff);
+    border-bottom: 1px solid #e0e0e0;
+    padding: 0.4em 1.5em;
+}
+#bins-controls label {
+    color: var(--text-color);
+    white-space: nowrap;
+}
+#bins-controls select {
+    background: var(--select-bg, #fff);
+    color: var(--select-color, #222);
+    border: 1px solid var(--select-border, #bbb);
+    border-radius: 4px;
+    padding: 0.2em 0.5em;
+    font-size: 0.95em;
+}
+[data-theme="dark"] #bins-controls {
+    background: #1a222c;
+    border-bottom: 1px solid #22334a;
+}
+[data-theme="dark"] .bins-island-title {
+    fill: #e6eaf3;
+}
+[data-theme="dark"] .bins-axis-label {
+    fill: #b0b8c0;
+}
+[data-theme="dark"] .bins-axis text {
+    fill: #b0b8c0;
+}
+[data-theme="dark"] .bins-axis line,
+[data-theme="dark"] .bins-axis path {
+    stroke: #4a5568;
+}
+[data-theme="dark"] .bins-grid {
+    stroke: #3a4556;
+}
+[data-theme="dark"] .bins-cell {
+    fill: rgba(255,255,255,0.02);
+}
 #performance-graph {
     width: 100%;
     height: 100%;

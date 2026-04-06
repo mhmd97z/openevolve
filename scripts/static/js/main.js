@@ -113,6 +113,13 @@ function loadAndRenderData(data) {
             window.updatePerformanceGraph(data.nodes);
         }
     }
+    const binsTab = document.getElementById('tab-bins');
+    const binsView = document.getElementById('view-bins');
+    if (binsTab && binsView && (binsTab.classList.contains('active') || binsView.style.display !== 'none')) {
+        if (window.updateBinsGraph) {
+            window.updateBinsGraph(data.nodes);
+        }
+    }
 }
 
 if (window.STATIC_DATA) {

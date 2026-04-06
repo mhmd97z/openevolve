@@ -28,7 +28,7 @@ if (!document.getElementById('custom-dark-toggle')) {
 }
 
 // Tab switching logic
-const tabs = ["branching", "performance", "list"];
+const tabs = ["branching", "performance", "bins", "list"];
 tabs.forEach(tab => {
     document.getElementById(`tab-${tab}`).addEventListener('click', function() {
         tabs.forEach(t => {
@@ -47,7 +47,7 @@ tabs.forEach(tab => {
             }
         }
         // Disable page scroll for graph tabs
-        if (tab === 'branching' || tab === 'performance') {
+        if (tab === 'branching' || tab === 'performance' || tab === 'bins') {
             document.body.style.overflow = 'hidden';
         } else {
             document.body.style.overflow = '';
