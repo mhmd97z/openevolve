@@ -2,7 +2,10 @@
 Tests for code utilities in openevolve.utils.code_utils
 """
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from openevolve.utils.code_utils import (
     _format_block_lines,
@@ -10,6 +13,7 @@ from openevolve.utils.code_utils import (
     extract_diffs,
     format_diff_summary,
 )
+from openevolve.utils.debug_utils import dump_invalid_diff_response
 
 
 class TestCodeUtils(unittest.TestCase):
@@ -180,6 +184,32 @@ class TestFormatDiffSummary(unittest.TestCase):
         """Empty input should return '(empty)'"""
         result = _format_block_lines([])
         self.assertEqual(result, "  (empty)")
+
+
+class TestDebugUtils(unittest.TestCase):
+    """Tests for debugging helpers"""
+
+    def test_dump_invalid_diff_response(self):
+        """Invalid diff responses should be persisted to the log directory"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dump_path = dump_invalid_diff_response(
+                llm_response="This response has no SEARCH/REPLACE blocks.",
+                iteration=21,
+                log_dir=temp_dir,
+                prompt={"system": "sys", "user": "usr"},
+            )
+
+            self.assertIsNotNone(dump_path)
+            dump_file = Path(dump_path)
+            self.assertTrue(dump_file.exists())
+            self.assertEqual(dump_file.parent.name, "invalid_diff_responses")
+
+            payload = json.loads(dump_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["iteration"], 21)
+            self.assertEqual(payload["reason"], "no_valid_diffs_found")
+            self.assertEqual(payload["llm_response"], "This response has no SEARCH/REPLACE blocks.")
+            self.assertEqual(payload["prompt"]["system"], "sys")
+            self.assertEqual(payload["prompt"]["user"], "usr")
 
 
 if __name__ == "__main__":

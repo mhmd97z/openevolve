@@ -18,6 +18,7 @@ from openevolve.utils.code_utils import (
     parse_full_rewrite,
     split_diffs_by_target,
 )
+from openevolve.utils.debug_utils import dump_invalid_diff_response
 
 
 @dataclass
@@ -99,7 +100,16 @@ async def run_iteration_with_shared_db(
             diff_blocks = extract_diffs(llm_response, config.diff_pattern)
 
             if not diff_blocks:
-                logger.warning(f"Iteration {iteration+1}: No valid diffs found in response")
+                dump_path = dump_invalid_diff_response(
+                    llm_response=llm_response,
+                    iteration=iteration + 1,
+                    log_dir=config.log_dir,
+                    prompt=prompt,
+                )
+                log_message = f"Iteration {iteration+1}: No valid diffs found in response"
+                if dump_path:
+                    log_message += f" (response dumped to {dump_path})"
+                logger.warning(log_message)
                 return None
 
             if config.prompt.programs_as_changes_description:

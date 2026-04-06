@@ -33,6 +33,7 @@ class SerializableResult:
     artifacts: Optional[Dict[str, Any]] = None
     iteration: int = 0
     error: Optional[str] = None
+    debug_dump_path: Optional[str] = None
     target_island: Optional[int] = None  # Island where child should be placed
 
 
@@ -220,11 +221,22 @@ def _run_iteration_worker(
                 format_diff_summary,
                 split_diffs_by_target,
             )
+            from openevolve.utils.debug_utils import dump_invalid_diff_response
 
             diff_blocks = extract_diffs(llm_response, _worker_config.diff_pattern)
             if not diff_blocks:
+                dump_path = dump_invalid_diff_response(
+                    llm_response=llm_response,
+                    iteration=iteration,
+                    log_dir=_worker_config.log_dir,
+                    prompt=prompt,
+                )
                 return SerializableResult(
-                    error="No valid diffs found in response", iteration=iteration
+                    error="No valid diffs found in response",
+                    iteration=iteration,
+                    llm_response=llm_response,
+                    prompt=prompt,
+                    debug_dump_path=dump_path,
                 )
 
             if _worker_config.prompt.programs_as_changes_description:
@@ -554,10 +566,24 @@ class ProcessParallelController:
                 result = future.result(timeout=timeout_seconds)
 
                 if result.error:
-                    logger.warning(f"Iteration {completed_iteration} error: {result.error}")
+                    log_message = f"Iteration {completed_iteration} error: {result.error}"
+                    if result.debug_dump_path:
+                        log_message += f" (response dumped to {result.debug_dump_path})"
+                    logger.warning(log_message)
                 elif result.child_program_dict:
                     # Reconstruct program from dict
                     child_program = Program(**result.child_program_dict)
+
+                    # Skip adding programs that failed compilation — they carry no
+                    # useful behavioural signal and would pollute MAP-Elites cells.
+                    if child_program.metrics.get("compile_success", 1.0) == 0.0:
+                        logger.warning(
+                            "Iteration %d: program %s failed compilation, "
+                            "not adding to database",
+                            completed_iteration,
+                            child_program.id,
+                        )
+                        continue
 
                     # Add to database with explicit target_island to ensure proper island placement
                     # This fixes issue #391: children should go to the target island, not inherit
@@ -664,19 +690,6 @@ class ProcessParallelController:
                             f"{child_program.id}"
                         )
 
-                    # Checkpoint callback
-                    # Don't checkpoint at iteration 0 (that's just the initial program)
-                    if (
-                        completed_iteration > 0
-                        and completed_iteration % self.config.checkpoint_interval == 0
-                    ):
-                        logger.info(
-                            f"Checkpoint interval reached at iteration {completed_iteration}"
-                        )
-                        self.database.log_island_status()
-                        if checkpoint_callback:
-                            checkpoint_callback(completed_iteration)
-
                     # Check target score
                     if target_score is not None and child_program.metrics:
                         if (
@@ -754,6 +767,18 @@ class ProcessParallelController:
                 future.cancel()
             except Exception as e:
                 logger.error(f"Error processing result from iteration {completed_iteration}: {e}")
+
+            # Checkpoint callback (independent of iteration success/failure)
+            # Don't checkpoint at iteration 0 (that's just the initial program).
+            if (
+                completed_iteration is not None
+                and completed_iteration > 0
+                and completed_iteration % self.config.checkpoint_interval == 0
+            ):
+                logger.info(f"Checkpoint interval reached at iteration {completed_iteration}")
+                self.database.log_island_status()
+                if checkpoint_callback:
+                    checkpoint_callback(completed_iteration)
 
             completed_iterations += 1
 
