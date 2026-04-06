@@ -7,6 +7,7 @@ import importlib.util
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -153,10 +154,21 @@ class Evaluator:
         # Retry logic for evaluation
         last_exception = None
         for attempt in range(self.config.max_retries + 1):
-            # Create a temporary file for the program
-            with tempfile.NamedTemporaryFile(suffix=self.program_suffix, delete=False) as temp_file:
-                temp_file.write(program_code.encode("utf-8"))
-                temp_file_path = temp_file.name
+            # Create a temporary file for the program, using a normalized
+            # UUID filename so downstream evaluators can identify it.
+            if program_id:
+                file_program_id = program_id.replace("-", "_")
+                temp_file_path = os.path.join(
+                    tempfile.gettempdir(), f"{file_program_id}{self.program_suffix}"
+                )
+                with open(temp_file_path, "w") as f:
+                    f.write(program_code)
+            else:
+                with tempfile.NamedTemporaryFile(
+                    suffix=self.program_suffix, delete=False
+                ) as temp_file:
+                    temp_file.write(program_code.encode("utf-8"))
+                    temp_file_path = temp_file.name
 
             try:
                 # Run evaluation
@@ -250,10 +262,11 @@ class Evaluator:
                 return eval_result.metrics
 
             except asyncio.TimeoutError:
-                # Handle timeout specially - don't retry, just return timeout result
                 logger.warning(f"Evaluation timed out after {self.config.timeout}s")
+                module = sys.modules.get("evaluation_module")
+                if module:
+                    self._cancel_evaluation_module(module)
 
-                # Capture timeout artifacts if enabled
                 if artifacts_enabled and program_id:
                     self._pending_artifacts[program_id] = {
                         "timeout": True,
@@ -399,6 +412,7 @@ class Evaluator:
                 stage1_eval_result = self._process_evaluation_result(stage1_result)
             except asyncio.TimeoutError:
                 logger.warning(f"Stage 1 evaluation timed out after {self.config.timeout}s")
+                self._cancel_evaluation_module(module)
                 return EvaluationResult(
                     metrics={"stage1_passed": 0.0, "error": 0.0, "timeout": True},
                     artifacts={
@@ -440,7 +454,7 @@ class Evaluator:
                 stage2_eval_result = self._process_evaluation_result(stage2_result)
             except asyncio.TimeoutError:
                 logger.warning(f"Stage 2 evaluation timed out after {self.config.timeout}s")
-                # Capture stage 2 failure, but keep stage 1 results
+                self._cancel_evaluation_module(module)
                 stage1_eval_result.artifacts.update(
                     {
                         "stage2_timeout": True,
@@ -502,7 +516,7 @@ class Evaluator:
                 stage3_eval_result = self._process_evaluation_result(stage3_result)
             except asyncio.TimeoutError:
                 logger.warning(f"Stage 3 evaluation timed out after {self.config.timeout}s")
-                # Capture stage 3 failure, but keep previous results
+                self._cancel_evaluation_module(module)
                 merged_result.artifacts.update(
                     {
                         "stage3_timeout": True,
@@ -664,6 +678,44 @@ class Evaluator:
             "timeout_config": self.config.timeout,
             "evaluation_file": self.evaluation_file,
         }
+
+    @staticmethod
+    def _kill_child_process_groups() -> list[int]:
+        """Terminate process groups of direct child processes (e.g. run.sh sessions)."""
+        my_pid = os.getpid()
+        killed: list[int] = []
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                if pid == my_pid:
+                    continue
+                try:
+                    with open(f"/proc/{pid}/status") as f:
+                        for line in f:
+                            if line.startswith("PPid:"):
+                                ppid = int(line.split()[1])
+                                if ppid == my_pid:
+                                    pgid = os.getpgid(pid)
+                                    if pgid != os.getpgrp():
+                                        os.killpg(pgid, signal.SIGTERM)
+                                        killed.append(pid)
+                                break
+                except (FileNotFoundError, ProcessLookupError, PermissionError,
+                        ValueError, IndexError):
+                    continue
+        except OSError:
+            pass
+        return killed
+
+    def _cancel_evaluation_module(self, module) -> None:
+        """Signal the evaluation module to stop and kill lingering child processes."""
+        if hasattr(module, "cancel_evaluation"):
+            module.cancel_evaluation()
+        killed = self._kill_child_process_groups()
+        if killed:
+            logger.info("Killed child process groups after timeout: %s", killed)
 
     def _passes_threshold(self, metrics: Dict[str, float], threshold: float) -> bool:
         """
