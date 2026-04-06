@@ -47,26 +47,28 @@ import { selectListNodeById } from './list.js';
             const graphXOffset = undefinedBoxWidth + undefinedBoxPad;
             const width = +svg.attr('width');
             const height = +svg.attr('height');
-            const graphHeight = Math.max(400, (maxGen - minGen + 1) * 48 + margin.top + margin.bottom);
-            let yScales = {};
-            islands.forEach((island, i) => {
-                yScales[island] = d3.scaleLinear()
-                    .domain([minGen, maxGen]).nice()
-                    .range([margin.top + i*graphHeight, margin.top + (i+1)*graphHeight - margin.bottom]);
-            });
+            const generations = d3.range(minGen, maxGen + 1);
             const xExtent = d3.extent(validNodes, d => d.metrics[metric]);
             const x = d3.scaleLinear()
                 .domain([xExtent[0], xExtent[1]]).nice()
                 .range([margin.left+graphXOffset, width - margin.right]);
+            const {laneMaps: yLayouts} = buildPerformanceYLayouts(
+                nodes,
+                generations,
+                islands,
+                showIslands,
+                margin,
+                node => getPerformanceNodeX(node, metric, x, margin.left + undefinedBoxWidth / 2)
+            );
             const highlightNodes = getHighlightNodes(nodes, highlightFilter, metric);
             const highlightIds = new Set(highlightNodes.map(n => n.id));
             // Animate valid nodes
             g.selectAll('circle')
                 .filter(function(d) { return validNodes.includes(d); })
                 .transition().duration(400)
-                .attr('cx', d => x(d.metrics[metric]))
-                .attr('cy', d => showIslands ? yScales[d.island](d.generation) : yScales[null](d.generation))
-                .attr('r', d => getNodeRadius(d))
+                .attr('cx', d => getPerformanceNodeX(d, metric, x, x.range()[0] - 100))
+                .attr('cy', d => getResolvedNodeY(d, yLayouts, showIslands))
+                .attr('r', d => getPerfNodeRadius(d))
                 .attr('fill', d => getNodeColor(d))
                 .attr('stroke', d => selectedProgramId === d.id ? 'red' : (highlightIds.has(d.id) ? '#2196f3' : '#333'))
                 .attr('stroke-width', d => selectedProgramId === d.id ? 3 : 1.5)
@@ -82,9 +84,9 @@ import { selectListNodeById } from './list.js';
             g.selectAll('circle')
                 .filter(function(d) { return undefinedNodes.includes(d); })
                 .transition().duration(400)
-                .attr('cx', d => d._nanX || (margin.left + undefinedBoxWidth/2))
-                .attr('cy', d => yScales[showIslands ? d.island : null](d.generation))
-                .attr('r', d => getNodeRadius(d))
+                .attr('cx', d => getPerformanceNodeX(d, metric, x, margin.left + undefinedBoxWidth / 2))
+                .attr('cy', d => getResolvedNodeY(d, yLayouts, showIslands))
+                .attr('r', d => getPerfNodeRadius(d))
                 .attr('fill', d => getNodeColor(d))
                 .attr('stroke', d => selectedProgramId === d.id ? 'red' : '#333')
                 .attr('stroke-width', d => selectedProgramId === d.id ? 3 : 1.5)
@@ -106,32 +108,10 @@ import { selectListNodeById } from './list.js';
             g.selectAll('line.performance-edge')
                 .data(edges, d => d.target.id)
                 .transition().duration(400)
-                .attr('x1', d => {
-                    const m = d.source.metrics && typeof d.source.metrics[metric] === 'number' ? d.source.metrics[metric] : null;
-                    if (m === null || isNaN(m)) {
-                        return margin.left + undefinedBoxWidth/2;
-                    } else {
-                        return x(m);
-                    }
-                })
-                .attr('y1', d => {
-                    const m = d.source.metrics && typeof d.source.metrics[metric] === 'number' ? d.source.metrics[metric] : null;
-                    const island = showIslands ? d.source.island : null;
-                    return yScales[island](d.source.generation);
-                })
-                .attr('x2', d => {
-                    const m = d.target.metrics && typeof d.target.metrics[metric] === 'number' ? d.target.metrics[metric] : null;
-                    if (m === null || isNaN(m)) {
-                        return margin.left + undefinedBoxWidth/2;
-                    } else {
-                        return x(m);
-                    }
-                })
-                .attr('y2', d => {
-                    const m = d.target.metrics && typeof d.target.metrics[metric] === 'number' ? d.target.metrics[metric] : null;
-                    const island = showIslands ? d.target.island : null;
-                    return yScales[island](d.target.generation);
-                })
+                .attr('x1', d => getPerformanceNodeX(d.source, metric, x, margin.left + undefinedBoxWidth / 2))
+                .attr('y1', d => getResolvedNodeY(d.source, yLayouts, showIslands))
+                .attr('x2', d => getPerformanceNodeX(d.target, metric, x, margin.left + undefinedBoxWidth / 2))
+                .attr('y2', d => getResolvedNodeY(d.target, yLayouts, showIslands))
                 .attr('stroke', d => (selectedProgramId && (d.source.id === selectedProgramId || d.target.id === selectedProgramId)) ? 'red' : '#888')
                 .attr('stroke-width', d => (selectedProgramId && (d.source.id === selectedProgramId || d.target.id === selectedProgramId)) ? 3 : 1.5)
                 .attr('opacity', 0.5);
@@ -265,6 +245,222 @@ let svg = null;
 let g = null;
 let zoomBehavior = null;
 let lastTransform = null;
+const PERFORMANCE_GENERATION_SPACING = 90;
+const PERFORMANCE_MIN_LANE_HEIGHT = 28;
+const PERFORMANCE_LANE_GAP = 8;
+const PERFORMANCE_ISLAND_GAP = 20;
+const PERFORMANCE_NODE_PADDING = 3;
+const PERFORMANCE_DODGE_ATTEMPTS = 120;
+
+function getPerfNodeRadius(node) {
+    return getNodeRadius(node) / 2;
+}
+
+function getRequiredLaneHeight(nodes, xFn) {
+    if (!nodes.length) {
+        return PERFORMANCE_MIN_LANE_HEIGHT;
+    }
+    if (typeof xFn !== 'function') {
+        const totalDiameter = nodes.reduce((sum, node) => sum + getPerfNodeRadius(node) * 2, 0);
+        const totalPadding = PERFORMANCE_NODE_PADDING * Math.max(nodes.length + 1, 2);
+        return Math.max(PERFORMANCE_MIN_LANE_HEIGHT, Math.ceil(totalDiameter + totalPadding));
+    }
+
+    const positionedNodes = nodes
+        .map(node => ({
+            x: xFn(node),
+            radius: getPerfNodeRadius(node)
+        }))
+        .filter(node => Number.isFinite(node.x))
+        .sort((a, b) => a.x - b.x);
+
+    if (!positionedNodes.length) {
+        return PERFORMANCE_MIN_LANE_HEIGHT;
+    }
+
+    const active = [];
+    let maxOverlapDepth = 1;
+    let maxActiveRadius = 0;
+
+    positionedNodes.forEach(node => {
+        const leftEdge = node.x - node.radius - PERFORMANCE_NODE_PADDING;
+        for (let i = active.length - 1; i >= 0; i--) {
+            if (active[i].rightEdge < leftEdge) {
+                active.splice(i, 1);
+            }
+        }
+
+        active.push({
+            rightEdge: node.x + node.radius + PERFORMANCE_NODE_PADDING,
+            radius: node.radius
+        });
+
+        const activeDepth = active.length;
+        const activeRadius = active.reduce((maxRadius, activeNode) => Math.max(maxRadius, activeNode.radius), 0);
+        maxOverlapDepth = Math.max(maxOverlapDepth, activeDepth);
+        maxActiveRadius = Math.max(maxActiveRadius, activeRadius);
+    });
+
+    const requiredHeight =
+        maxOverlapDepth * (maxActiveRadius * 2 + PERFORMANCE_NODE_PADDING) +
+        PERFORMANCE_NODE_PADDING * 2;
+    return Math.max(PERFORMANCE_MIN_LANE_HEIGHT, Math.ceil(requiredHeight));
+}
+
+function buildPerformanceYLayouts(nodes, generations, islands, showIslands, margin, xFn) {
+    const groupedNodes = new Map();
+    nodes.forEach(node => {
+        const islandKey = showIslands ? node.island : null;
+        const key = `${node.generation}|${islandKey}`;
+        if (!groupedNodes.has(key)) {
+            groupedNodes.set(key, []);
+        }
+        groupedNodes.get(key).push(node);
+    });
+
+    const laneMaps = {};
+    const islandExtents = {};
+    let cursorY = margin.top;
+
+    islands.forEach((island, islandIndex) => {
+        const islandKey = showIslands ? island : null;
+        const laneMap = new Map();
+        const islandTop = cursorY;
+
+        generations.forEach((generation, generationIndex) => {
+            const laneNodes = groupedNodes.get(`${generation}|${islandKey}`) || [];
+            const laneHeight = getRequiredLaneHeight(laneNodes, xFn);
+            const lane = {
+                top: cursorY,
+                height: laneHeight,
+                bottom: cursorY + laneHeight,
+                center: cursorY + laneHeight / 2
+            };
+            laneMap.set(generation, lane);
+            cursorY = lane.bottom;
+            if (generationIndex < generations.length - 1) {
+                cursorY += PERFORMANCE_LANE_GAP;
+            }
+        });
+
+        islandExtents[island] = {
+            top: islandTop,
+            bottom: cursorY,
+            height: cursorY - islandTop,
+            center: islandTop + (cursorY - islandTop) / 2
+        };
+        laneMaps[island] = laneMap;
+
+        if (showIslands && islandIndex < islands.length - 1) {
+            cursorY += PERFORMANCE_ISLAND_GAP;
+        }
+    });
+
+    return {
+        laneMaps,
+        islandExtents,
+        totalHeight: cursorY + margin.bottom
+    };
+}
+
+function getGenerationLane(node, yLayouts, showIslands) {
+    return yLayouts[showIslands ? node.island : null]?.get(node.generation);
+}
+
+function getPerformanceBaseY(node, yLayouts, showIslands) {
+    return getGenerationLane(node, yLayouts, showIslands)?.center ?? 0;
+}
+
+function getResolvedNodeY(node, yLayouts, showIslands) {
+    return typeof node._adjustedY === 'number'
+        ? node._adjustedY
+        : getPerformanceBaseY(node, yLayouts, showIslands);
+}
+
+function getPerformanceNodeX(node, metric, x, fallbackX) {
+    if (node.metrics && typeof node.metrics[metric] === 'number') {
+        return x(node.metrics[metric]);
+    }
+    if (typeof node._nanX === 'number') {
+        return node._nanX;
+    }
+    return fallbackX;
+}
+
+function getPerformanceGroupKey(node, showIslands) {
+    return `${node.generation}|${showIslands ? node.island : 'main'}`;
+}
+
+function resolveNodeOverlaps(nodes, xFn, yLayouts, showIslands) {
+    const groups = new Map();
+    nodes.forEach(node => {
+        const key = getPerformanceGroupKey(node, showIslands);
+        if (!groups.has(key)) {
+            const lane = getGenerationLane(node, yLayouts, showIslands);
+            groups.set(key, {
+                baseY: getPerformanceBaseY(node, yLayouts, showIslands),
+                bandTop: lane?.top ?? 0,
+                bandBottom: lane?.bottom ?? 0,
+                nodes: []
+            });
+        }
+        groups.get(key).nodes.push(node);
+    });
+
+    groups.forEach(group => {
+        const placed = [];
+        const sortedNodes = [...group.nodes].sort((a, b) => {
+            const ax = xFn(a);
+            const bx = xFn(b);
+            if (ax === bx) {
+                return getPerfNodeRadius(b) - getPerfNodeRadius(a);
+            }
+            return ax - bx;
+        });
+
+        sortedNodes.forEach(node => {
+            const radius = getPerfNodeRadius(node);
+            const cx = xFn(node);
+            const step = Math.max(radius + PERFORMANCE_NODE_PADDING, 8);
+            const baseY = group.baseY;
+            const minY = group.bandTop + radius;
+            const maxY = group.bandBottom - radius;
+            let candidateY = baseY;
+
+            if (Number.isFinite(cx)) {
+                for (let attempt = 0; attempt < PERFORMANCE_DODGE_ATTEMPTS; attempt++) {
+                    if (attempt === 0) {
+                        candidateY = baseY;
+                    } else {
+                        const level = Math.ceil(attempt / 2);
+                        const direction = attempt % 2 === 1 ? -1 : 1;
+                        candidateY = baseY + direction * level * step;
+                    }
+
+                    if (minY <= maxY) {
+                        candidateY = Math.max(minY, Math.min(maxY, candidateY));
+                    } else {
+                        candidateY = baseY;
+                    }
+
+                    const collides = placed.some(placedNode => {
+                        const dx = cx - placedNode.cx;
+                        const dy = candidateY - placedNode.cy;
+                        const minDistance = radius + placedNode.radius + PERFORMANCE_NODE_PADDING;
+                        return (dx * dx + dy * dy) < (minDistance * minDistance);
+                    });
+
+                    if (!collides) {
+                        break;
+                    }
+                }
+            }
+
+            node._adjustedY = candidateY;
+            placed.push({cx, cy: candidateY, radius});
+        });
+    });
+}
 
 function autoZoomPerformanceGraph(nodes, x, yScales, islands, graphHeight, margin, undefinedBoxWidth, width, svg, g) {
     // Compute bounding box for all nodes (including NaN box)
@@ -272,13 +468,9 @@ function autoZoomPerformanceGraph(nodes, x, yScales, islands, graphHeight, margi
     // Valid nodes
     nodes.forEach(n => {
         let cx, cy;
-        if (n.metrics && typeof n.metrics[getSelectedMetric()] === 'number') {
-            cx = x(n.metrics[getSelectedMetric()]);
-            cy = yScales[document.getElementById('show-islands-toggle')?.checked ? n.island : null](n.generation);
-        } else if (typeof n._nanX === 'number') {
-            cx = n._nanX;
-            cy = yScales[document.getElementById('show-islands-toggle')?.checked ? n.island : null](n.generation);
-        }
+        const showIslands = document.getElementById('show-islands-toggle')?.checked;
+        cx = getPerformanceNodeX(n, getSelectedMetric(), x, margin.left + undefinedBoxWidth / 2);
+        cy = getResolvedNodeY(n, yScales, showIslands);
         if (typeof cx === 'number' && typeof cy === 'number') {
             minX = Math.min(minX, cx);
             maxX = Math.max(maxX, cx);
@@ -404,31 +596,61 @@ function updatePerformanceGraph(nodes, options = {}) {
     const margin = {top: 60, right: 40, bottom: 40, left: 60};
     let undefinedBoxWidth = 70;
     const undefinedBoxPad = 54;
-    const genCount = (maxGen - minGen + 1) || 1;
-    const graphHeight = Math.max(400, genCount * 48 + margin.top + margin.bottom);
-    const totalGraphHeight = showIslands ? (graphHeight * islands.length) : graphHeight;
-    const svgHeight = Math.max(windowHeight - toolbarHeight - 24, totalGraphHeight);
+    const generations = d3.range(minGen, maxGen + 1);
     const graphXOffset = undefinedBoxWidth + undefinedBoxPad;
+    const xExtent = d3.extent(validNodes, d => d.metrics[metric]);
+    const x = d3.scaleLinear()
+        .domain([xExtent[0], xExtent[1]]).nice()
+        .range([margin.left+graphXOffset, width - margin.right]);
+    const {laneMaps: yLayouts, islandExtents, totalHeight} = buildPerformanceYLayouts(
+        nodes,
+        generations,
+        islands,
+        showIslands,
+        margin,
+        node => getPerformanceNodeX(node, metric, x, margin.left + undefinedBoxWidth / 2)
+    );
+    const lastIsland = islands[islands.length - 1];
+    const graphBottom = islandExtents[lastIsland]?.bottom ?? margin.top;
+    const graphHeight = graphBottom - margin.top + margin.bottom;
+    const totalGraphHeight = Math.max(graphHeight, totalHeight);
+    const svgHeight = Math.max(windowHeight - toolbarHeight - 24, totalGraphHeight);
     svg.attr('width', width).attr('height', svgHeight);
     // Remove old axes/labels
-    g.selectAll('.axis, .axis-label, .island-label, .nan-label, .nan-box').remove();
-    // Y scales per island
-    let yScales = {};
-    islands.forEach((island, i) => {
-        yScales[island] = d3.scaleLinear()
-            .domain([minGen, maxGen]).nice()
-            .range([margin.top + i*graphHeight, margin.top + (i+1)*graphHeight - margin.bottom]);
-        // Y axis
-        g.append('g')
-            .attr('class', 'axis')
-            .attr('transform', `translate(${margin.left+graphXOffset},0)`)
-            .call(d3.axisLeft(yScales[island]).ticks(Math.min(12, genCount)));
+    g.selectAll('.axis, .axis-label, .island-label, .nan-label, .nan-box, .gen-box, .gen-box-label').remove();
+    islands.forEach((island) => {
+        generations.forEach(gen => {
+            const lane = yLayouts[island]?.get(gen);
+            const bandY = lane?.top ?? margin.top;
+            const bandHeight = lane?.height ?? PERFORMANCE_MIN_LANE_HEIGHT;
+            g.insert('rect', ':first-child')
+                .attr('class', 'gen-box')
+                .attr('x', margin.left + graphXOffset)
+                .attr('y', bandY)
+                .attr('width', width - (margin.left + graphXOffset) - margin.right)
+                .attr('height', bandHeight)
+                .attr('fill', gen % 2 === 0 ? '#fafafa' : '#ffffff')
+                .attr('stroke', '#ddd')
+                .attr('stroke-width', 1)
+                .attr('rx', 6)
+                .attr('pointer-events', 'none');
+            g.append('text')
+                .attr('class', 'gen-box-label')
+                .attr('x', margin.left + graphXOffset - 8)
+                .attr('y', bandY + bandHeight / 2)
+                .attr('text-anchor', 'end')
+                .attr('dominant-baseline', 'middle')
+                .attr('font-size', '0.9em')
+                .attr('fill', '#666')
+                .attr('pointer-events', 'none')
+                .text(`Gen ${gen}`);
+        });
         // Y axis label (always at start of main graph)
         g.append('text')
             .attr('class', 'axis-label')
             .attr('transform', `rotate(-90)`) // vertical
             .attr('y', margin.left + graphXOffset + 8)
-            .attr('x', -(margin.top + i*graphHeight + (graphHeight - margin.top - margin.bottom)/2))
+            .attr('x', -(islandExtents[island]?.center ?? (margin.top + graphHeight / 2)))
             .attr('dy', '-2.2em')
             .attr('text-anchor', 'middle')
             .attr('font-size', '1em')
@@ -439,7 +661,7 @@ function updatePerformanceGraph(nodes, options = {}) {
             g.append('text')
                 .attr('class', 'island-label')
                 .attr('x', (width + undefinedBoxWidth) / 2)
-                .attr('y', margin.top + i*graphHeight + 38)
+                .attr('y', (islandExtents[island]?.top ?? margin.top) + 38)
                 .attr('text-anchor', 'middle')
                 .attr('font-size', '2.1em')
                 .attr('font-weight', 700)
@@ -449,25 +671,24 @@ function updatePerformanceGraph(nodes, options = {}) {
         }
     });
     // X axis
-    const xExtent = d3.extent(validNodes, d => d.metrics[metric]);
-    const x = d3.scaleLinear()
-        .domain([xExtent[0], xExtent[1]]).nice()
-        .range([margin.left+graphXOffset, width - margin.right]);
     // Remove old x axis and label only
     g.selectAll('.x-axis, .x-axis-label').remove();
     // Add x axis group
     g.append('g')
         .attr('class', 'axis x-axis')
         .attr('transform', `translate(0,${margin.top})`)
-        .call(d3.axisTop(x));
+        .call(d3.axisTop(x))
+        .selectAll('text')
+        .attr('font-size', '1.1em');
     // Add x axis label
     g.append('text')
         .attr('class', 'x-axis-label')
         .attr('x', (width + undefinedBoxWidth) / 2)
-        .attr('y', margin.top - 28) // just below the axis
-        .attr('fill', '#888')
+        .attr('y', margin.top - 32)
+        .attr('fill', '#666')
         .attr('text-anchor', 'middle')
-        .attr('font-size', '1.1em')
+        .attr('font-size', '1.4em')
+        .attr('font-weight', 500)
         .text(metric);
     // NaN box
     if (undefinedNodes.length) {
@@ -488,7 +709,7 @@ function updatePerformanceGraph(nodes, options = {}) {
         const nanBoxRight = margin.left + graphXOffset - nanBoxGap;
         const nanBoxLeft = nanBoxRight - undefinedBoxWidth;
         const boxTop = margin.top;
-        const boxBottom = showIslands ? (margin.top + islands.length*graphHeight - margin.bottom) : (margin.top + graphHeight - margin.bottom);
+        const boxBottom = graphBottom;
         g.append('text')
             .attr('class', 'nan-label')
             .attr('x', nanBoxLeft + undefinedBoxWidth/2)
@@ -528,20 +749,13 @@ function updatePerformanceGraph(nodes, options = {}) {
     // Remove all old edges before re-adding (fixes missing/incorrect edges after metric change)
     g.selectAll('line.performance-edge').remove();
     // Helper to get x/y for a node (handles NaN and valid nodes)
-    function getNodeXY(node, x, yScales, showIslands, metric) {
+    function getNodeXY(node, x, yLayouts, showIslands, metric) {
         // Returns [x, y] for a node, handling both valid and NaN nodes
         if (!node) return [null, null];
-        const y = yScales[showIslands ? node.island : null](node.generation);
-        if (node.metrics && typeof node.metrics[metric] === 'number') {
-            return [x(node.metrics[metric]), y];
-        } else if (typeof node._nanX === 'number') {
-            return [node._nanX, y];
-        } else {
-            // fallback: center of NaN box if _nanX not set
-            // This should not happen, but fallback for safety
-            return [x.range()[0] - 100, y];
-        }
+        const y = getResolvedNodeY(node, yLayouts, showIslands);
+        return [getPerformanceNodeX(node, metric, x, x.range()[0] - 100), y];
     }
+    resolveNodeOverlaps(nodes, node => getPerformanceNodeX(node, metric, x, x.range()[0] - 100), yLayouts, showIslands);
     g.selectAll('line.performance-edge')
         .data(edges, d => d.target.id)
         .enter()
@@ -550,10 +764,10 @@ function updatePerformanceGraph(nodes, options = {}) {
         .attr('stroke', '#888')
         .attr('stroke-width', 1.5)
         .attr('opacity', 0.5)
-        .attr('x1', d => getNodeXY(d.source, x, yScales, showIslands, metric)[0])
-        .attr('y1', d => getNodeXY(d.source, x, yScales, showIslands, metric)[1])
-        .attr('x2', d => getNodeXY(d.target, x, yScales, showIslands, metric)[0])
-        .attr('y2', d => getNodeXY(d.target, x, yScales, showIslands, metric)[1])
+        .attr('x1', d => getNodeXY(d.source, x, yLayouts, showIslands, metric)[0])
+        .attr('y1', d => getNodeXY(d.source, x, yLayouts, showIslands, metric)[1])
+        .attr('x2', d => getNodeXY(d.target, x, yLayouts, showIslands, metric)[0])
+        .attr('y2', d => getNodeXY(d.target, x, yLayouts, showIslands, metric)[1])
         .attr('stroke', d => {
             if (selectedProgramId && (d.source.id === selectedProgramId || d.target.id === selectedProgramId)) {
                 return 'red';
@@ -580,9 +794,9 @@ function updatePerformanceGraph(nodes, options = {}) {
     nodeSel.enter()
         .append('circle')
         .attr('class', 'performance-node')
-        .attr('cx', d => x(d.metrics[metric]))
-        .attr('cy', d => showIslands ? yScales[d.island](d.generation) : yScales[null](d.generation))
-        .attr('r', d => getNodeRadius(d))
+        .attr('cx', d => getPerformanceNodeX(d, metric, x, x.range()[0] - 100))
+        .attr('cy', d => getResolvedNodeY(d, yLayouts, showIslands))
+        .attr('r', d => getPerfNodeRadius(d))
         .attr('fill', d => getNodeColor(d))
         .attr('stroke', d => selectedProgramId === d.id ? 'red' : (highlightIds.has(d.id) ? '#2196f3' : '#333'))
         .attr('stroke-width', d => selectedProgramId === d.id ? 3 : 1.5)
@@ -626,9 +840,9 @@ function updatePerformanceGraph(nodes, options = {}) {
         })
         .merge(nodeSel)
         .transition().duration(500)
-        .attr('cx', d => x(d.metrics[metric]))
-        .attr('cy', d => showIslands ? yScales[d.island](d.generation) : yScales[null](d.generation))
-        .attr('r', d => getNodeRadius(d))
+        .attr('cx', d => getPerformanceNodeX(d, metric, x, x.range()[0] - 100))
+        .attr('cy', d => getResolvedNodeY(d, yLayouts, showIslands))
+        .attr('r', d => getPerfNodeRadius(d))
         .attr('fill', d => getNodeColor(d))
         .attr('stroke', d => selectedProgramId === d.id ? 'red' : (highlightIds.has(d.id) ? '#2196f3' : '#333'))
         .attr('stroke-width', d => selectedProgramId === d.id ? 3 : 1.5)
@@ -647,9 +861,9 @@ function updatePerformanceGraph(nodes, options = {}) {
     nanSel.enter()
         .append('circle')
         .attr('class', 'performance-nan')
-        .attr('cx', d => d._nanX)
-        .attr('cy', d => yScales[showIslands ? d.island : null](d.generation))
-        .attr('r', d => getNodeRadius(d))
+        .attr('cx', d => getPerformanceNodeX(d, metric, x, margin.left + undefinedBoxWidth / 2))
+        .attr('cy', d => getResolvedNodeY(d, yLayouts, showIslands))
+        .attr('r', d => getPerfNodeRadius(d))
         .attr('fill', d => getNodeColor(d))
         .attr('stroke', d => selectedProgramId === d.id ? 'red' : '#333')
         .attr('stroke-width', d => selectedProgramId === d.id ? 3 : 1.5)
@@ -693,9 +907,9 @@ function updatePerformanceGraph(nodes, options = {}) {
         })
         .merge(nanSel)
         .transition().duration(500)
-        .attr('cx', d => d._nanX)
-        .attr('cy', d => yScales[showIslands ? d.island : null](d.generation))
-        .attr('r', d => getNodeRadius(d))
+        .attr('cx', d => getPerformanceNodeX(d, metric, x, margin.left + undefinedBoxWidth / 2))
+        .attr('cy', d => getResolvedNodeY(d, yLayouts, showIslands))
+        .attr('r', d => getPerfNodeRadius(d))
         .attr('fill', d => getNodeColor(d))
         .attr('stroke', d => selectedProgramId === d.id ? 'red' : '#333')
         .attr('stroke-width', d => selectedProgramId === d.id ? 3 : 1.5)
@@ -709,7 +923,7 @@ function updatePerformanceGraph(nodes, options = {}) {
     nanSel.exit().transition().duration(300).attr('opacity', 0).remove();
     // Auto-zoom to fit on initial render or when requested
     if (options.autoZoom || (!lastTransform && nodes.length)) {
-        autoZoomPerformanceGraph(nodes, x, yScales, islands, graphHeight, margin, undefinedBoxWidth, width, svg, g);
+        autoZoomPerformanceGraph(nodes, x, yLayouts, islands, graphHeight, margin, undefinedBoxWidth, width, svg, g);
     }
 }
 
