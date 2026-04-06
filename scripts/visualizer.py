@@ -8,13 +8,17 @@ import re as _re
 from numbers import Number
 from typing import Optional, Any
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, send_file
 
 from manual import create_manual_blueprint
 
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
+
+# Resolve the workspace root (two levels above this script: scripts/ -> openevolve/ -> workspace/)
+_WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_EXP_BASE = os.path.join(_WORKSPACE, "5g-eval", "exp_dirs")
 
 
 def find_latest_checkpoint(base_folder):
@@ -141,6 +145,45 @@ def program_page(program_id):
         checkpoint_dir=checkpoint_dir,
         artifacts_json=artifacts_json,
     )
+
+
+@app.route("/api/figures/<program_id>")
+def api_figures(program_id):
+    """Return a list of figure URLs for all exp-dirs belonging to program_id."""
+    normalized = program_id.replace("-", "_")
+    pattern = os.path.join(_EXP_BASE, "openevolve", "*", normalized, "*", "run*", "figures", "*.png")
+    matches = sorted(glob.glob(pattern))
+
+    figures = []
+    for abs_path in matches:
+        # Build a path relative to _EXP_BASE for the serving route
+        rel = os.path.relpath(abs_path, _EXP_BASE)
+        # Extract readable labels from the path components
+        parts = rel.replace("\\", "/").split("/")
+        # parts: openevolve / <run_id> / <program_id> / <scenario> / <run_dir> / figures / <file>
+        scenario = parts[3] if len(parts) > 3 else "unknown"
+        run_dir  = parts[4] if len(parts) > 4 else ""
+        filename = parts[-1]
+        figures.append({
+            "scenario": scenario,
+            "run_dir":  run_dir,
+            "filename": filename,
+            "url":      f"/exp_figures/{rel}",
+        })
+
+    return jsonify(figures)
+
+
+@app.route("/exp_figures/<path:filepath>")
+def serve_exp_figure(filepath):
+    """Serve a figure PNG from the exp_dirs tree."""
+    abs_path = os.path.realpath(os.path.join(_EXP_BASE, filepath))
+    # Safety: ensure the resolved path is still inside _EXP_BASE
+    if not abs_path.startswith(os.path.realpath(_EXP_BASE)):
+        return "Forbidden", 403
+    if not os.path.isfile(abs_path):
+        return "Not found", 404
+    return send_file(abs_path, mimetype="image/png")
 
 
 def run_static_export(args):

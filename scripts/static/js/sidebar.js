@@ -296,7 +296,9 @@ export function showSidebarContent(d, fromHover = false) {
     let tabContentHtml = '';
     let tabNames = [];
     if (d.code && typeof d.code === 'string' && d.code.trim() !== '') tabNames.push('Code');
-    if ((d.prompts && typeof d.prompts === 'object' && Object.keys(d.prompts).length > 0) || (d.artifacts_json && typeof d.artifacts_json === 'object' && Object.keys(d.artifacts_json).length > 0)) tabNames.push('Prompts');
+    const hasEvalData = (d.metrics && typeof d.metrics === 'object' && Object.keys(d.metrics).length > 0) || d.artifacts_json;
+    if (hasEvalData) tabNames.push('Eval');
+    if ((d.prompts && typeof d.prompts === 'object' && Object.keys(d.prompts).length > 0)) tabNames.push('Prompts');
     const children = allNodeData.filter(n => n.parent_id === d.id);
     if (children.length > 0) tabNames.push('Children');
 
@@ -313,6 +315,7 @@ export function showSidebarContent(d, fromHover = false) {
     if (parentNodeForDiff && parentNodeForDiff.code && parentNodeForDiff.code.trim() !== '') {
         tabNames.push('Diff');
     }
+    tabNames.push('Figures');
  
         let activeTab = lastSidebarTab && tabNames.includes(lastSidebarTab) ? lastSidebarTab : tabNames[0];
  
@@ -368,6 +371,38 @@ export function showSidebarContent(d, fromHover = false) {
             if (tabName === 'Code') {
                 return `<pre class="sidebar-code-pre">${escapeHtml(d.code)}</pre>`;
             }
+            if (tabName === 'Eval') {
+                let html = '';
+                if (d.artifacts_json) {
+                    let artifactText = d.artifacts_json;
+                    if (typeof artifactText === 'string') {
+                        try {
+                            const parsed = JSON.parse(artifactText);
+                            if (parsed && typeof parsed === 'object') {
+                                if (parsed.scenario_summary) {
+                                    html += '<div style="margin-bottom:0.5em;"><b>Scenario Summary:</b></div>';
+                                    html += '<pre class="sidebar-pre" style="white-space:pre-wrap;font-size:0.88em;">' + escapeHtml(parsed.scenario_summary) + '</pre>';
+                                }
+                                const otherKeys = Object.keys(parsed).filter(k => k !== 'scenario_summary');
+                                if (otherKeys.length > 0) {
+                                    const rest = {};
+                                    otherKeys.forEach(k => rest[k] = parsed[k]);
+                                    html += '<div style="margin-top:0.7em;margin-bottom:0.5em;"><b>Other Artifacts:</b></div>';
+                                    html += '<pre class="sidebar-pre" style="white-space:pre-wrap;font-size:0.88em;">' + escapeHtml(JSON.stringify(rest, null, 2)) + '</pre>';
+                                }
+                            } else {
+                                html += '<pre class="sidebar-pre" style="white-space:pre-wrap;font-size:0.88em;">' + escapeHtml(artifactText) + '</pre>';
+                            }
+                        } catch (e) {
+                            html += '<pre class="sidebar-pre" style="white-space:pre-wrap;font-size:0.88em;">' + escapeHtml(artifactText) + '</pre>';
+                        }
+                    } else if (typeof artifactText === 'object') {
+                        html += '<pre class="sidebar-pre" style="white-space:pre-wrap;font-size:0.88em;">' + escapeHtml(JSON.stringify(artifactText, null, 2)) + '</pre>';
+                    }
+                }
+                if (!html) html = '<div style="color:#888;">No evaluation data available for this node.</div>';
+                return html;
+            }
             if (tabName === 'Prompts') {
                 // Prompt select logic
                 let promptOptions = [];
@@ -387,12 +422,6 @@ export function showSidebarContent(d, fromHover = false) {
                          }
                      }
                  }
-                 // Artifacts
-                 if (d.artifacts_json) {
-                     const optLabel = `artifacts`;
-                     promptOptions.push(optLabel);
-                     promptMap[optLabel] = d.artifacts_json;
-                 }
                  // Get last selected prompt from localStorage, or default to first
                  let lastPromptKey = localStorage.getItem('sidebarPromptSelect') || promptOptions[0] || '';
                  if (!promptMap[lastPromptKey]) lastPromptKey = promptOptions[0] || '';
@@ -405,19 +434,6 @@ export function showSidebarContent(d, fromHover = false) {
                  }
                  // Show only the selected prompt
                  let promptVal = promptMap[lastPromptKey];
-                 
-                 // Handle unicode escape for artifacts JSON display
-                 if (lastPromptKey === 'artifacts' && typeof promptVal === 'string') {
-                     try {
-                         // Parse and stringify to properly escape unicode
-                         const parsed = JSON.parse(promptVal);
-                         promptVal = JSON.stringify(parsed, null, 2);
-                     } catch (e) {
-                         // If parsing fails, use original value
-                         console.warn('Failed to parse artifacts JSON for unicode escape:', e);
-                     }
-                 }
-
                  let promptHtml = `<pre class="sidebar-pre">${promptVal ?? ''}</pre>`;
                  return selectHtml + promptHtml;
              }
@@ -450,14 +466,76 @@ export function showSidebarContent(d, fromHover = false) {
                  const curCode = d.code || '';
                  return renderCodeDiff(parentCode, curCode);
              }
+             if (tabName === 'Figures') {
+                 return '<div id="figures-tab-body" style="text-align:center;padding:0.5em;color:#888;">Loading figures…</div>';
+             }
              return '';
          }
  
+        // Async helper: fetch figures for this program and render with a scenario dropdown
+        function loadFiguresTab() {
+            fetch(`/api/figures/${encodeURIComponent(d.id)}`)
+                .then(r => r.json())
+                .then(figures => {
+                    const container = document.getElementById('figures-tab-body');
+                    if (!container) return;
+                    if (!figures || figures.length === 0) {
+                        container.innerHTML = '<span style="color:#888;">No figures found for this program.</span>';
+                        return;
+                    }
+
+                    // Group by scenario (key = scenario name only, e.g. "openevolve_s1")
+                    const byScenario = {};
+                    figures.forEach(f => {
+                        if (!byScenario[f.scenario]) byScenario[f.scenario] = [];
+                        byScenario[f.scenario].push(f);
+                    });
+
+                    const scenarioKeys = Object.keys(byScenario);
+                    const savedKey = localStorage.getItem('figuresScenarioSelect');
+                    let activeScenario = scenarioKeys.includes(savedKey) ? savedKey : scenarioKeys[0];
+
+                    function renderFigureImages(scenarioKey) {
+                        const files = byScenario[scenarioKey] || [];
+                        if (files.length === 0) return '<span style="color:#888;">No figures for this scenario.</span>';
+                        return files.map(f =>
+                            `<div style="margin-bottom:0.8em;">
+                                <div style="font-size:0.78em;color:#888;margin-bottom:0.25em;">${escapeHtml(f.filename.replace('.png','').replace(/_/g,' '))}</div>
+                                <img src="${escapeHtml(f.url)}" style="max-width:100%;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,0.3);" loading="lazy" alt="${escapeHtml(f.filename)}" />
+                            </div>`
+                        ).join('');
+                    }
+
+                    function renderFiguresTabHtml(scenarioKey) {
+                        const selectHtml = `<select id="figures-scenario-select" style="margin-bottom:0.8em;max-width:100%;font-size:0.95em;padding:0.2em 0.4em;">
+                            ${scenarioKeys.map(k => `<option value="${escapeHtml(k)}"${k===scenarioKey?' selected':''}>${escapeHtml(k)}</option>`).join('')}
+                        </select>`;
+                        return selectHtml + `<div id="figures-images-pane">${renderFigureImages(scenarioKey)}</div>`;
+                    }
+
+                    container.innerHTML = renderFiguresTabHtml(activeScenario);
+
+                    const sel = document.getElementById('figures-scenario-select');
+                    if (sel) {
+                        sel.onchange = function() {
+                            localStorage.setItem('figuresScenarioSelect', sel.value);
+                            const pane = document.getElementById('figures-images-pane');
+                            if (pane) pane.innerHTML = renderFigureImages(sel.value);
+                        };
+                    }
+                })
+                .catch(err => {
+                    const container = document.getElementById('figures-tab-body');
+                    if (container) container.innerHTML = `<span style="color:#c44;">Failed to load figures: ${escapeHtml(String(err))}</span>`;
+                });
+        }
+
      if (tabNames.length > 0) {
          tabHtml = '<div id="sidebar-tab-bar" style="display:flex;gap:0.7em;margin-bottom:0.7em;">' +
              tabNames.map((name) => `<span class="sidebar-tab${name===activeTab?' active':''}" data-tab="${name}">${name}</span>`).join('') + '</div>';
          tabContentHtml = `<div id="sidebar-tab-content">${renderSidebarTabContent(activeTab, d, children)}</div>`;
      }
+
     let parentIslandHtml = '';
     if (d.parent_id && d.parent_id !== 'None') {
         const parent = allNodeData.find(n => n.id == d.parent_id);
@@ -496,6 +574,11 @@ export function showSidebarContent(d, fromHover = false) {
     }
     attachPromptSelectHandler();
 
+    // If the Figures tab is active on initial render, kick off the async load
+    if (activeTab === 'Figures') {
+        setTimeout(loadFiguresTab, 0);
+    }
+
     if (tabNames.length > 1) {
         const tabBar = document.getElementById('sidebar-tab-bar');
         Array.from(tabBar.children).forEach(tabEl => {
@@ -508,6 +591,9 @@ export function showSidebarContent(d, fromHover = false) {
                 tabContent.innerHTML = renderSidebarTabContent(tabName, d, children);
                 if (tabName === 'Prompts') {
                     attachPromptSelectHandler();
+                }
+                if (tabName === 'Figures') {
+                    loadFiguresTab();
                 }
                 setTimeout(() => {
                     document.querySelectorAll('.child-link').forEach(link => {
