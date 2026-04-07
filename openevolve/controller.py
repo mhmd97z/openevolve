@@ -82,6 +82,7 @@ class OpenEvolve:
             os.path.dirname(initial_program_path), "openevolve_output"
         )
         os.makedirs(self.output_dir, exist_ok=True)
+        os.environ["OPENEVOLVE_OUTPUT_DIR"] = os.path.abspath(self.output_dir)
 
         # Set up logging
         self._setup_logging()
