@@ -19,10 +19,12 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments"""
     parser = argparse.ArgumentParser(description="OpenEvolve - Evolutionary coding agent")
 
-    parser.add_argument("initial_program", help="Path to the initial program file")
-
     parser.add_argument(
-        "evaluation_file", help="Path to the evaluation file containing an 'evaluate' function"
+        "positionals",
+        nargs="*",
+        metavar="FILE",
+        help="[initial_program] evaluation_file — one arg = evaluation file only "
+             "(initial program read from config); two args = initial program + evaluation file",
     )
 
     parser.add_argument("--config", "-c", help="Path to configuration file (YAML)", default=None)
@@ -69,17 +71,38 @@ async def main_async() -> int:
     """
     args = parse_args()
 
-    # Check if files exist
-    if not os.path.exists(args.initial_program):
-        print(f"Error: Initial program file '{args.initial_program}' not found")
+    # Unpack positional args: 1 arg = evaluation_file, 2 args = initial_program + evaluation_file
+    positionals = args.positionals or []
+    if len(positionals) == 2:
+        initial_program_arg, evaluation_file = positionals
+    elif len(positionals) == 1:
+        initial_program_arg = None
+        evaluation_file = positionals[0]
+    elif len(positionals) == 0:
+        print("Error: evaluation_file is required.\n"
+              "Usage: openevolve-run [initial_program] evaluation_file --config CONFIG")
         return 1
-
-    if not os.path.exists(args.evaluation_file):
-        print(f"Error: Evaluation file '{args.evaluation_file}' not found")
+    else:
+        print("Error: too many positional arguments (expected at most 2).\n"
+              "Usage: openevolve-run [initial_program] evaluation_file --config CONFIG")
         return 1
 
     # Load base config from file or defaults
     config = load_config(args.config)
+
+    # Resolve initial_program: CLI arg > config YAML > error
+    initial_program = initial_program_arg or config.initial_program
+    if not initial_program:
+        print("Error: No initial program specified. Provide it as a positional argument "
+              "or set 'initial_program' in the config YAML.")
+        return 1
+    if not os.path.exists(initial_program):
+        print(f"Error: Initial program file '{initial_program}' not found")
+        return 1
+
+    if not os.path.exists(evaluation_file):
+        print(f"Error: Evaluation file '{evaluation_file}' not found")
+        return 1
 
     # Create config object with command-line overrides
     if args.api_base or args.primary_model or args.secondary_model:
@@ -106,8 +129,8 @@ async def main_async() -> int:
     # Initialize OpenEvolve
     try:
         openevolve = OpenEvolve(
-            initial_program_path=args.initial_program,
-            evaluation_file=args.evaluation_file,
+            initial_program_path=initial_program,
+            evaluation_file=evaluation_file,
             config=config,
             output_dir=args.output,
         )

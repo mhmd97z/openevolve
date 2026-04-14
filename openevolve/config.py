@@ -402,6 +402,7 @@ class Config:
     """Master configuration for OpenEvolve"""
 
     # General settings
+    initial_program: Optional[str] = None
     max_iterations: int = 10000
     checkpoint_interval: int = 100
     log_level: str = "INFO"
@@ -437,6 +438,12 @@ class Config:
         with open(config_path, "r") as f:
             config_dict = yaml.safe_load(f)
         config = cls.from_dict(config_dict)
+
+        # Resolve initial_program relative to config file location
+        if config.initial_program:
+            ip = Path(config.initial_program)
+            if not ip.is_absolute():
+                config.initial_program = str((config_path.parent / ip).resolve())
 
         # Resolve template_dir relative to config file location
         if config.prompt.template_dir:
