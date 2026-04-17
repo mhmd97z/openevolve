@@ -117,23 +117,59 @@ function loadAndRenderData(data) {
     }
 }
 
-if (window.STATIC_DATA) {
+let currentRunName = null;
+let pollIntervalId = null;
+
+function dataUrl() {
+    return currentRunName ? `/api/data/${encodeURIComponent(currentRunName)}` : '/api/data';
+}
+
+function fetchAndRender() {
+    fetch(dataUrl())
+        .then(resp => resp.json())
+        .then(data => {
+            const dataStr = JSON.stringify(data);
+            if (dataStr === lastDataStr) return;
+            lastDataStr = dataStr;
+            loadAndRenderData(data);
+        });
+}
+
+function startPolling() {
+    if (pollIntervalId) clearInterval(pollIntervalId);
+    lastDataStr = null;
+    fetchAndRender();
+    pollIntervalId = setInterval(fetchAndRender, 2000);
+}
+
+// Multi-run dropdown setup
+const runSelect = document.getElementById('run-select');
+if (runSelect) {
+    fetch('/api/runs')
+        .then(resp => resp.json())
+        .then(({ runs }) => {
+            runs.forEach(name => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                runSelect.appendChild(opt);
+            });
+            const saved = localStorage.getItem('selectedRun');
+            if (saved && runs.includes(saved)) {
+                runSelect.value = saved;
+            }
+            currentRunName = runSelect.value || null;
+            startPolling();
+        });
+    runSelect.addEventListener('change', () => {
+        currentRunName = runSelect.value || null;
+        localStorage.setItem('selectedRun', currentRunName);
+        startPolling();
+    });
+} else if (window.STATIC_DATA) {
     loadAndRenderData(window.STATIC_DATA);
 } else {
-    function fetchAndRender() {
-        fetch('/api/data')
-            .then(resp => resp.json())
-            .then(data => {
-                const dataStr = JSON.stringify(data);
-                if (dataStr === lastDataStr) {
-                    return;
-                }
-                lastDataStr = dataStr;
-                loadAndRenderData(data);
-            });
-    }
-    fetchAndRender();
-    setInterval(fetchAndRender, 2000); // Live update every 2s
+    startPolling();
 }
 
 export let width = window.innerWidth;

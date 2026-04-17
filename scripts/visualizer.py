@@ -20,6 +20,8 @@ app = Flask(__name__, template_folder="templates")
 _WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _EXP_BASE = os.path.join(_WORKSPACE, "5g-eval", "exp_dirs")
 
+_MULTI_RUN_DIR = None  # Set when --path points to a parent directory with multiple runs
+
 
 def find_latest_checkpoint(base_folder):
     # Check whether the base folder is itself a checkpoint folder
@@ -105,27 +107,77 @@ def check_json_float(v: Optional[float]) -> bool:
     return isinstance(v, Number) and not (math.isinf(v) or math.isnan(v))
 
 
+def _has_own_checkpoints(path):
+    """Return True if path is itself a checkpoint dir or directly contains a checkpoints/ dir."""
+    if os.path.basename(path).startswith("checkpoint_"):
+        return True
+    return os.path.isdir(os.path.join(path, "checkpoints"))
+
+
+def _is_multi_run_dir(path):
+    """Return True if path is a parent directory containing multiple run subdirectories
+    (each with checkpoints/ inside), rather than a single run directory itself."""
+    if not os.path.isdir(path):
+        return False
+    if _has_own_checkpoints(path):
+        return False
+    child_runs = 0
+    for entry in os.listdir(path):
+        sub = os.path.join(path, entry)
+        if os.path.isdir(sub) and _has_own_checkpoints(sub):
+            child_runs += 1
+            if child_runs >= 1:
+                return True
+    return False
+
+
+def _list_runs(parent_dir):
+    """Return sorted list of run directory names that contain checkpoints."""
+    runs = []
+    for entry in sorted(os.listdir(parent_dir)):
+        sub = os.path.join(parent_dir, entry)
+        if os.path.isdir(sub) and _has_own_checkpoints(sub):
+            runs.append(entry)
+    return runs
+
+
 @app.route("/")
 def index():
-    return render_template("index.html", checkpoint_dir=checkpoint_dir)
+    multi = _MULTI_RUN_DIR is not None
+    return render_template("index.html", checkpoint_dir=checkpoint_dir, multi_run=multi)
 
 
 checkpoint_dir = None  # Global variable to store the checkpoint directory
 
 
+@app.route("/api/runs")
+def api_runs():
+    """Return the list of available runs when in multi-run mode."""
+    if _MULTI_RUN_DIR is None:
+        return jsonify({"runs": []})
+    return jsonify({"runs": _list_runs(_MULTI_RUN_DIR)})
+
+
 @app.route("/api/data")
-def data():
+@app.route("/api/data/<run_name>")
+def data(run_name=None):
     global checkpoint_dir
-    base_folder = os.environ.get("EVOLVE_OUTPUT", "examples/")
+
+    if run_name and _MULTI_RUN_DIR:
+        safe_name = os.path.basename(run_name)
+        base_folder = os.path.join(_MULTI_RUN_DIR, safe_name)
+    else:
+        base_folder = os.environ.get("EVOLVE_OUTPUT", "examples/")
+
     checkpoint_dir = find_latest_checkpoint(base_folder)
     if not checkpoint_dir:
         logger.info(f"No checkpoints found in {base_folder}")
         return jsonify({"archive": [], "nodes": [], "edges": [], "checkpoint_dir": ""})
 
     logger.info(f"Loading data from checkpoint: {checkpoint_dir}")
-    data = load_evolution_data(checkpoint_dir)
-    logger.debug(f"Data: {data}")
-    return jsonify(data)
+    result = load_evolution_data(checkpoint_dir)
+    logger.debug(f"Data: {result}")
+    return jsonify(result)
 
 
 @app.route("/program/<program_id>")
@@ -147,23 +199,75 @@ def program_page(program_id):
     )
 
 
+def _current_run_output_dir():
+    """Return the OpenEvolve run output dir currently being visualized.
+
+    Derives it from the global `checkpoint_dir` (parent of `checkpoints/`)
+    so it stays correct in multi-run mode. Falls back to $EVOLVE_OUTPUT.
+    """
+    global checkpoint_dir
+    if checkpoint_dir:
+        # checkpoint_dir = <run>/checkpoints/checkpoint_XX
+        parent = os.path.dirname(os.path.dirname(os.path.abspath(checkpoint_dir)))
+        if os.path.isdir(parent):
+            return parent
+    env_output = os.environ.get("EVOLVE_OUTPUT")
+    if env_output and os.path.isdir(env_output):
+        return os.path.abspath(env_output)
+    return None
+
+
 @app.route("/api/figures/<program_id>")
 def api_figures(program_id):
-    """Return a list of figure URLs for all exp-dirs belonging to program_id."""
-    normalized = program_id.replace("-", "_")
-    pattern = os.path.join(_EXP_BASE, "openevolve", "*", normalized, "*", "run*", "figures", "*.png")
-    matches = sorted(glob.glob(pattern))
+    """Return a list of figure URLs for program_id.
 
+    Primary source: the run's own output tree
+        <run>/figures/<program_id>/<scenario>/<run_dir>/<file>.png
+    Fallback: the legacy 5g-eval/exp_dirs tree (for older runs that
+    predate the self-contained figure mirror).
+    """
     figures = []
-    for abs_path in matches:
-        # Build a path relative to _EXP_BASE for the serving route
+    seen = set()
+
+    run_output = _current_run_output_dir()
+    if run_output:
+        run_pattern = os.path.join(
+            run_output, "figures", program_id, "*", "*", "*.png"
+        )
+        for abs_path in sorted(glob.glob(run_pattern)):
+            rel = os.path.relpath(abs_path, run_output)
+            parts = rel.replace("\\", "/").split("/")
+            # parts: figures / <program_id> / <scenario> / <run_dir> / <file>
+            scenario = parts[2] if len(parts) > 2 else "unknown"
+            run_dir = parts[3] if len(parts) > 3 else ""
+            filename = parts[-1]
+            key = (scenario, run_dir, filename)
+            if key in seen:
+                continue
+            seen.add(key)
+            figures.append({
+                "scenario": scenario,
+                "run_dir":  run_dir,
+                "filename": filename,
+                "url":      f"/run_figures/{rel}",
+            })
+
+    # Backward-compatible fallback: legacy 5g-eval/exp_dirs layout
+    normalized = program_id.replace("-", "_")
+    legacy_pattern = os.path.join(
+        _EXP_BASE, "openevolve", "*", normalized, "*", "run*", "figures", "*.png"
+    )
+    for abs_path in sorted(glob.glob(legacy_pattern)):
         rel = os.path.relpath(abs_path, _EXP_BASE)
-        # Extract readable labels from the path components
         parts = rel.replace("\\", "/").split("/")
         # parts: openevolve / <run_id> / <program_id> / <scenario> / <run_dir> / figures / <file>
         scenario = parts[3] if len(parts) > 3 else "unknown"
-        run_dir  = parts[4] if len(parts) > 4 else ""
+        run_dir = parts[4] if len(parts) > 4 else ""
         filename = parts[-1]
+        key = (scenario, run_dir, filename)
+        if key in seen:
+            continue
+        seen.add(key)
         figures.append({
             "scenario": scenario,
             "run_dir":  run_dir,
@@ -174,12 +278,27 @@ def api_figures(program_id):
     return jsonify(figures)
 
 
+@app.route("/run_figures/<path:filepath>")
+def serve_run_figure(filepath):
+    """Serve a figure PNG from the current run's output tree."""
+    run_output = _current_run_output_dir()
+    if not run_output:
+        return "Not found", 404
+    abs_path = os.path.realpath(os.path.join(run_output, filepath))
+    base = os.path.realpath(run_output)
+    if not abs_path.startswith(base + os.sep) and abs_path != base:
+        return "Forbidden", 403
+    if not os.path.isfile(abs_path):
+        return "Not found", 404
+    return send_file(abs_path, mimetype="image/png")
+
+
 @app.route("/exp_figures/<path:filepath>")
 def serve_exp_figure(filepath):
-    """Serve a figure PNG from the exp_dirs tree."""
+    """Serve a figure PNG from the legacy exp_dirs tree (backward compat)."""
     abs_path = os.path.realpath(os.path.join(_EXP_BASE, filepath))
-    # Safety: ensure the resolved path is still inside _EXP_BASE
-    if not abs_path.startswith(os.path.realpath(_EXP_BASE)):
+    base = os.path.realpath(_EXP_BASE)
+    if not abs_path.startswith(base + os.sep) and abs_path != base:
         return "Forbidden", 403
     if not os.path.isfile(abs_path):
         return "Not found", 404
@@ -245,7 +364,7 @@ if __name__ == "__main__":
         "--path",
         type=str,
         default="examples/",
-        help="Path to OpenEvolve run output directory (e.g. openevolve_output) or its checkpoints/checkpoint_*.",
+        help="Path to a single run output directory, a checkpoint_* dir, or a parent directory containing multiple runs.",
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -271,7 +390,16 @@ if __name__ == "__main__":
     if args.static_output:
         run_static_export(args)
 
-    os.environ["EVOLVE_OUTPUT"] = args.path
+    import sys
+    _this = sys.modules[__name__]
+    if _is_multi_run_dir(args.path):
+        _this._MULTI_RUN_DIR = os.path.abspath(args.path)
+        runs = _list_runs(_this._MULTI_RUN_DIR)
+        logger.info(f"Multi-run mode: found {len(runs)} runs in {_this._MULTI_RUN_DIR}")
+        os.environ["EVOLVE_OUTPUT"] = os.path.join(_this._MULTI_RUN_DIR, runs[0]) if runs else args.path
+    else:
+        os.environ["EVOLVE_OUTPUT"] = args.path
+
     logger.info(f"Starting server at http://{args.host}:{args.port} with log level {args.log_level.upper()}")
     logger.info(f"Manual UI: http://{args.host}:{args.port}/manual")
     app.run(host=args.host, port=args.port, debug=True)

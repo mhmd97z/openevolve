@@ -12,6 +12,10 @@
             <span style="font-size:1.1em;font-weight:bold;">OpenEvolve Evolution Visualizer</span>
             <span id="checkpoint-label" style="font-size:0.9em;color:#888;">Checkpoint: None</span>
         </div>
+        {% if multi_run %}
+        <label class="toolbar-label" for="run-select">Run:
+        <select id="run-select" style="max-width:280px;"></select></label>
+        {% endif %}
         <div class="toolbar-spacer"></div>
         <div class="tabs">
             <div class="tab active" id="tab-branching">Branching</div>
