@@ -28,7 +28,7 @@ if (!document.getElementById('custom-dark-toggle')) {
 }
 
 // Tab switching logic
-const tabs = ["branching", "performance", "bins", "list"];
+const tabs = ["branching", "performance", "bins", "list", "test"];
 tabs.forEach(tab => {
     document.getElementById(`tab-${tab}`).addEventListener('click', function() {
         tabs.forEach(t => {

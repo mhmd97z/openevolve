@@ -305,6 +305,43 @@ def serve_exp_figure(filepath):
     return send_file(abs_path, mimetype="image/png")
 
 
+@app.route("/api/test_results")
+def api_test_results_list():
+    """List test_runner result bundles under <run>/test_results/<stem>/summary.json."""
+    run_output = _current_run_output_dir()
+    if not run_output:
+        return jsonify({"configs": []})
+    base = os.path.join(run_output, "test_results")
+    configs: list[str] = []
+    if os.path.isdir(base):
+        for entry in sorted(os.listdir(base)):
+            sub = os.path.join(base, entry)
+            summary = os.path.join(sub, "summary.json")
+            if os.path.isfile(summary):
+                configs.append(entry)
+    return jsonify({"configs": configs})
+
+
+@app.route("/api/test_results/<config_stem>")
+def api_test_results_detail(config_stem: str):
+    """Return parsed summary.json for one test_runner bundle."""
+    run_output = _current_run_output_dir()
+    if not run_output:
+        return jsonify({"error": "no_run_output"}), 404
+    safe = os.path.basename(config_stem)
+    summary_path = os.path.realpath(
+        os.path.join(run_output, "test_results", safe, "summary.json")
+    )
+    run_real = os.path.realpath(run_output)
+    if not summary_path.startswith(run_real + os.sep) and summary_path != run_real:
+        return jsonify({"error": "forbidden"}), 403
+    if not os.path.isfile(summary_path):
+        return jsonify({"error": "not_found"}), 404
+    with open(summary_path, encoding="utf-8") as f:
+        data = json.load(f)
+    return jsonify(data)
+
+
 def run_static_export(args):
     output_dir = args.static_output
     os.makedirs(output_dir, exist_ok=True)
