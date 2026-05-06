@@ -16,10 +16,6 @@ from manual import create_manual_blueprint
 logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
 
-# Resolve the workspace root (two levels above this script: scripts/ -> openevolve/ -> workspace/)
-_WORKSPACE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_EXP_BASE = os.path.join(_WORKSPACE, "5g-eval", "exp_dirs")
-
 _MULTI_RUN_DIR = None  # Set when --path points to a parent directory with multiple runs
 
 
@@ -221,53 +217,30 @@ def _current_run_output_dir():
 def api_figures(program_id):
     """Return a list of figure URLs for program_id.
 
-    Primary source: the run's own output tree
+    Sourced from the run's own mirrored output tree:
         <run>/figures/<program_id>/<scenario>/<run_dir>/<file>.png
-    Fallback: the legacy 5g-eval/exp_dirs tree (for older runs that
-    predate the self-contained figure mirror).
     """
-    figures = []
-    seen = set()
+    figures: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
 
     run_output = _current_run_output_dir()
-    if run_output:
-        # Some pipelines normalize hyphens to underscores when creating the
-        # per-program figure directory, so check both spellings.
-        candidate_ids = {program_id, program_id.replace("-", "_")}
-        run_paths: list[str] = []
-        for pid in candidate_ids:
-            run_paths.extend(
-                glob.glob(os.path.join(run_output, "figures", pid, "*", "*", "*.png"))
-            )
-        for abs_path in sorted(set(run_paths)):
-            rel = os.path.relpath(abs_path, run_output)
-            parts = rel.replace("\\", "/").split("/")
-            # parts: figures / <program_id> / <scenario> / <run_dir> / <file>
-            scenario = parts[2] if len(parts) > 2 else "unknown"
-            run_dir = parts[3] if len(parts) > 3 else ""
-            filename = parts[-1]
-            key = (scenario, run_dir, filename)
-            if key in seen:
-                continue
-            seen.add(key)
-            figures.append({
-                "scenario": scenario,
-                "run_dir":  run_dir,
-                "filename": filename,
-                "url":      f"/run_figures/{rel}",
-            })
+    if not run_output:
+        return jsonify(figures)
 
-    # Backward-compatible fallback: legacy 5g-eval/exp_dirs layout
-    normalized = program_id.replace("-", "_")
-    legacy_pattern = os.path.join(
-        _EXP_BASE, "openevolve", "*", normalized, "*", "run*", "figures", "*.png"
-    )
-    for abs_path in sorted(glob.glob(legacy_pattern)):
-        rel = os.path.relpath(abs_path, _EXP_BASE)
+    # Some pipelines normalize hyphens to underscores when creating the
+    # per-program figure directory, so check both spellings.
+    candidate_ids = {program_id, program_id.replace("-", "_")}
+    run_paths: list[str] = []
+    for pid in candidate_ids:
+        run_paths.extend(
+            glob.glob(os.path.join(run_output, "figures", pid, "*", "*", "*.png"))
+        )
+    for abs_path in sorted(set(run_paths)):
+        rel = os.path.relpath(abs_path, run_output)
         parts = rel.replace("\\", "/").split("/")
-        # parts: openevolve / <run_id> / <program_id> / <scenario> / <run_dir> / figures / <file>
-        scenario = parts[3] if len(parts) > 3 else "unknown"
-        run_dir = parts[4] if len(parts) > 4 else ""
+        # parts: figures / <program_id> / <scenario> / <run_dir> / <file>
+        scenario = parts[2] if len(parts) > 2 else "unknown"
+        run_dir = parts[3] if len(parts) > 3 else ""
         filename = parts[-1]
         key = (scenario, run_dir, filename)
         if key in seen:
@@ -277,7 +250,7 @@ def api_figures(program_id):
             "scenario": scenario,
             "run_dir":  run_dir,
             "filename": filename,
-            "url":      f"/exp_figures/{rel}",
+            "url":      f"/run_figures/{rel}",
         })
 
     return jsonify(figures)
@@ -291,18 +264,6 @@ def serve_run_figure(filepath):
         return "Not found", 404
     abs_path = os.path.realpath(os.path.join(run_output, filepath))
     base = os.path.realpath(run_output)
-    if not abs_path.startswith(base + os.sep) and abs_path != base:
-        return "Forbidden", 403
-    if not os.path.isfile(abs_path):
-        return "Not found", 404
-    return send_file(abs_path, mimetype="image/png")
-
-
-@app.route("/exp_figures/<path:filepath>")
-def serve_exp_figure(filepath):
-    """Serve a figure PNG from the legacy exp_dirs tree (backward compat)."""
-    abs_path = os.path.realpath(os.path.join(_EXP_BASE, filepath))
-    base = os.path.realpath(_EXP_BASE)
     if not abs_path.startswith(base + os.sep) and abs_path != base:
         return "Forbidden", 403
     if not os.path.isfile(abs_path):
