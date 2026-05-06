@@ -231,10 +231,15 @@ def api_figures(program_id):
 
     run_output = _current_run_output_dir()
     if run_output:
-        run_pattern = os.path.join(
-            run_output, "figures", program_id, "*", "*", "*.png"
-        )
-        for abs_path in sorted(glob.glob(run_pattern)):
+        # Some pipelines normalize hyphens to underscores when creating the
+        # per-program figure directory, so check both spellings.
+        candidate_ids = {program_id, program_id.replace("-", "_")}
+        run_paths: list[str] = []
+        for pid in candidate_ids:
+            run_paths.extend(
+                glob.glob(os.path.join(run_output, "figures", pid, "*", "*", "*.png"))
+            )
+        for abs_path in sorted(set(run_paths)):
             rel = os.path.relpath(abs_path, run_output)
             parts = rel.replace("\\", "/").split("/")
             # parts: figures / <program_id> / <scenario> / <run_dir> / <file>

@@ -294,6 +294,12 @@ class OpenEvolve:
                 self.initial_program_code, initial_program_id
             )
 
+            # Capture any artifacts produced during the initial evaluation so the
+            # seed program shows the same Eval-tab data (scenario_summary, stderr,
+            # etc.) as evolved children. Without this, evaluator._pending_artifacts
+            # for the initial program is never popped and the artifacts are dropped.
+            initial_artifacts = self.evaluator.get_pending_artifacts(initial_program_id)
+
             initial_program = Program(
                 id=initial_program_id,
                 code=self.initial_program_code,
@@ -304,6 +310,9 @@ class OpenEvolve:
             )
 
             self.database.add(initial_program)
+
+            if initial_artifacts:
+                self.database.store_artifacts(initial_program_id, initial_artifacts)
 
             # Check if combined_score is present in the metrics
             if "combined_score" not in initial_metrics:

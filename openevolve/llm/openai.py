@@ -25,6 +25,85 @@ def _iso_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+# Models that only respond on /v1/responses (not /v1/chat/completions).
+# Add new entries here as OpenAI ships them.
+RESPONSES_ONLY_MODEL_PREFIXES = (
+    "o1-pro",
+    "o3-pro",
+    "gpt-5-pro",
+    "gpt-5.5-pro",
+)
+
+
+def _is_openai_endpoint(api_base: Optional[str]) -> bool:
+    """True for the canonical OpenAI endpoint (not Gemini compat, vLLM, etc.)."""
+    if not api_base:
+        return True
+    return "api.openai.com" in api_base
+
+
+def _use_responses_api(model: str, api_base: Optional[str]) -> bool:
+    if not _is_openai_endpoint(api_base):
+        return False
+    m = str(model).lower()
+    return any(m.startswith(p) for p in RESPONSES_ONLY_MODEL_PREFIXES)
+
+
+def _to_responses_params(chat_params: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate chat-completions-style params to Responses-API params.
+
+    The Responses API takes ``input`` (list of {role, content}) plus
+    ``max_output_tokens`` and ``reasoning={"effort": ...}``. It rejects
+    chat-only fields like ``temperature``/``top_p`` for reasoning models, so
+    we drop them here.
+    """
+    out: Dict[str, Any] = {"model": chat_params["model"]}
+
+    messages = chat_params.get("messages") or []
+    instructions_parts: List[str] = []
+    input_items: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                instructions_parts.append(str(content))
+            continue
+        input_items.append({"role": role, "content": str(content)})
+    if instructions_parts:
+        out["instructions"] = "\n\n".join(instructions_parts)
+    out["input"] = input_items
+
+    max_out = chat_params.get("max_completion_tokens") or chat_params.get("max_tokens")
+    if max_out is not None:
+        out["max_output_tokens"] = max_out
+
+    effort = chat_params.get("reasoning_effort")
+    if effort is not None:
+        out["reasoning"] = {"effort": effort}
+
+    if "verbosity" in chat_params:
+        out["text"] = {"verbosity": chat_params["verbosity"]}
+
+    return out
+
+
+def _extract_responses_text(response: Any) -> str:
+    """Pull the assistant text out of a Responses API result."""
+    text = getattr(response, "output_text", None)
+    if text:
+        return text
+    chunks: List[str] = []
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) != "message":
+            continue
+        for piece in getattr(item, "content", []) or []:
+            t = getattr(piece, "text", None)
+            if t:
+                chunks.append(t)
+    return "".join(chunks)
+
+
 def _build_display_prompt(messages: List[Dict[str, str]]) -> str:
     """
     Render messages into a single plain-text prompt for the manual UI.
@@ -214,13 +293,22 @@ class OpenAILLM(LLMInterface):
         if self.client is None:
             raise RuntimeError("OpenAI client is not initialized (manual_mode enabled?)")
 
-        # Use asyncio to run the blocking API call in a thread pool
         loop = asyncio.get_event_loop()
+        logger = logging.getLogger(__name__)
+
+        if _use_responses_api(params.get("model", ""), self.api_base):
+            responses_params = _to_responses_params(params)
+            logger.debug(f"Responses API parameters: {responses_params}")
+            response = await loop.run_in_executor(
+                None, lambda: self.client.responses.create(**responses_params)
+            )
+            content = _extract_responses_text(response)
+            logger.debug(f"Responses API response: {content}")
+            return content
+
         response = await loop.run_in_executor(
             None, lambda: self.client.chat.completions.create(**params)
         )
-        # Logging of system prompt, user message and response content
-        logger = logging.getLogger(__name__)
         logger.debug(f"API parameters: {params}")
         logger.debug(f"API response: {response.choices[0].message.content}")
         return response.choices[0].message.content
