@@ -505,22 +505,83 @@ class Evaluator:
             if not hasattr(module, "evaluate_stage3"):
                 return merged_result
 
-            # Run third stage with timeout
+            # Run third stage with timeout. Stage 3 typically runs an entire
+            # scenario bank and needs a budget proportional to its length —
+            # the global ``evaluator.timeout`` (sized for stage 1 / stage 2)
+            # is almost always too small, so we let the evaluation module
+            # advertise a scenario-aware budget via ``get_stage3_timeout``.
+            stage3_timeout_seconds: float = float(self.config.timeout)
+            if hasattr(module, "get_stage3_timeout"):
+                try:
+                    candidate = float(module.get_stage3_timeout())
+                    if candidate > 0:
+                        stage3_timeout_seconds = candidate
+                except Exception as e:
+                    logger.warning(
+                        "module.get_stage3_timeout() raised %s; falling back to %ss",
+                        e, self.config.timeout,
+                    )
+
             try:
 
                 async def run_stage3():
                     loop = asyncio.get_event_loop()
                     return await loop.run_in_executor(None, module.evaluate_stage3, program_path)
 
-                stage3_result = await asyncio.wait_for(run_stage3(), timeout=self.config.timeout)
+                stage3_result = await asyncio.wait_for(
+                    run_stage3(), timeout=stage3_timeout_seconds
+                )
                 stage3_eval_result = self._process_evaluation_result(stage3_result)
             except asyncio.TimeoutError:
-                logger.warning(f"Stage 3 evaluation timed out after {self.config.timeout}s")
+                logger.warning(
+                    f"Stage 3 evaluation timed out after {stage3_timeout_seconds}s"
+                )
                 self._cancel_evaluation_module(module)
+
+                # The stage-3 thread was killed mid-loop, so the metrics
+                # inherited in ``merged_result`` come from stage 2 (smoke
+                # scenario) only. Promoting those as the program's official
+                # score lets fast-but-broken candidates win the population.
+                # Try to recover real per-scenario metrics from the
+                # evaluation module's incremental snapshot; fall back to
+                # forced failure so we never keep stage-2-only fitness.
+                partial_result = None
+                if hasattr(module, "get_partial_stage3_result"):
+                    try:
+                        partial_result = module.get_partial_stage3_result(program_id)
+                    except Exception as e:
+                        logger.warning(
+                            "module.get_partial_stage3_result() raised %s; "
+                            "treating stage-3 timeout as full failure",
+                            e,
+                        )
+
+                if partial_result is not None:
+                    partial_eval = self._process_evaluation_result(partial_result)
+                    for name, value in partial_eval.metrics.items():
+                        if isinstance(value, (int, float)) and name != "error":
+                            merged_result.metrics[name] = float(value)
+                    merged_result.artifacts.update(partial_eval.artifacts)
+                else:
+                    # No partial snapshot — force failure metrics so the
+                    # candidate cannot be promoted as a "best" program on
+                    # the strength of its smoke-scenario score alone.
+                    for failure_name, failure_value in (
+                        ("combined_score", 0.0),
+                        ("avg_p95_latency_ratio", 1.0),
+                        ("worst_p95_latency_ratio", 1.0),
+                        ("avg_p95_prb_ratio", 1.0),
+                        ("worst_p95_prb_ratio", 1.0),
+                    ):
+                        if failure_name in merged_result.metrics:
+                            merged_result.metrics[failure_name] = failure_value
+                    merged_result.metrics["run_failed"] = 1.0
+
                 merged_result.artifacts.update(
                     {
                         "stage3_timeout": True,
                         "failure_stage": "stage3",
+                        "stage3_timeout_duration": stage3_timeout_seconds,
                     }
                 )
                 merged_result.metrics["stage3_passed"] = 0.0
